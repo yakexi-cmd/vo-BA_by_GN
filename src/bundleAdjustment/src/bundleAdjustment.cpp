@@ -3,7 +3,7 @@
     2.通过特征匹配获得前一帧、后一帧之间的像素坐标(u,v)
     3.通过空间三维点的投影获得投影点的像素坐标？
     4.利用两者的差值，进行最小二乘估计(Bundle Adjustment光束平差法)获得转换矩阵R和平移矩阵t信息
-*/////
+*/
 #include <ros/ros.h>
 #include <iostream>
 #include<opencv2/opencv.hpp>
