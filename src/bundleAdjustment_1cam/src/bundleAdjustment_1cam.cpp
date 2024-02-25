@@ -19,8 +19,17 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 
+#include <Eigen/Core>
+#include <sophus/se3.hpp>
+
+
 using namespace cv;
 using namespace std;
+using namespace Eigen;
+
+typedef vector<Eigen::Vector2d,Eigen::aligned_allocator<Eigen::Vector2d>> VecVector2d;
+typedef vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> VecVector3d;
+
 
 int COL,ROW;
 // inBorder函数进行边界检测
@@ -45,6 +54,7 @@ void reduceVector(vector<Point2f> &v ,vector<uchar> status)
     v.resize(j);
 }
 
+// 对极约束通过2d-2d图像帧获得Rt信息
 void pose_estimation_2d2d(
     const vector<Point2f> &pts1,
     const vector<Point2f> &pts2,
@@ -60,6 +70,79 @@ void pose_estimation_2d2d(
     Mat essential_matrix;
     essential_matrix=findEssentialMat(pts1,pts2,focal_length,principal_point);
     recoverPose (essential_matrix,pts1,pts2,R,t,focal_length,principal_point);
+}
+
+// BA光束平差法(pnp的一种)利用3d-2d图像帧同时优化位姿和相机坐标，非线性优化得到更准确的R，t值
+void bundleAdjustment_gaussNewton(
+    const VecVector3d &points_3d,const VecVector2d &points_2d,
+    const Mat &K,
+    Sophus::SE3d &T)//T对应位姿[R|t]
+{
+    typedef Matrix<double ,6,1> Vector6d;//代表位姿R和t，矩阵T是位姿的李群
+    double cost=0,lastcost=0;//代价，这个应该表示的是误差吧？
+    // 后面采用cost+=e  是因为在一张图像中不止一个特征点，因此要对一帧图中所有特征点的误差求和
+    const int iteration=100;
+    double fx=K.at<double>(0,0);
+    double fy=K.at<double>(1,1);
+    double cx=K.at<double>(0,2);
+    double cy=K.at<double>(1,2);
+
+    for(int it=0;it<iteration;it++)
+    {
+        Matrix<double,6,6> H=Matrix<double,6,6>::Zero();
+        Vector6d b=Vector6d::Zero();
+        cost=0;
+        for(int id=0;id<points_3d.size();id++)
+        {
+            Vector3d p_=T*points_3d[id];
+            Vector2d pose_u(fx*p_[0]/p_[2]+cx,fy*p_[1]/p_[2]+cy);
+            Vector2d e=points_2d[id]-pose_u;
+
+            cost+=e.squaredNorm();
+            Matrix<double,2,6> J;
+            double x=p_[0],y=p_[1],z=p_[2];
+            double inv_z=1/z;
+            double inv_z2=inv_z*inv_z;
+
+            J << -fx * inv_z,
+            0,
+            fx * x * inv_z2,
+            fx * x * y * inv_z2,
+            -fx - fx * x * x * inv_z2,
+            fx * y * inv_z,
+            0,
+            -fy * inv_z,
+            fy * y * inv_z2,
+            fy + fy * y * y * inv_z2,
+            -fy * x * y * inv_z2,
+            -fy * x * inv_z;
+   
+            H += J.transpose()*J;
+            b += -J.transpose()*e;
+
+        }
+        Vector6d dx;
+        dx=H.ldlt().solve(b);
+        // 去掉两种无解的情况:（1）dx无解  （2）当前损失值比上一次还大，这种情况下并未进行优化，因此跳出循环，不保留此次结果
+        if(isnan(dx[0]))
+        {
+            break;
+        }
+        if(it>0 && cost>=lastcost)
+        {
+            break;
+        }
+
+        T=Sophus::SE3d::exp(dx)*T;
+        lastcost=cost;
+
+        if(dx.norm()<1e-6)
+        {
+            break;
+        }
+    }
+    cout<<T.matrix()<<endl;
+
 }
 /*
 1.首先通过goodFeaturesToTrack或者GFTTDetector特征检测获得特征点,
@@ -143,8 +226,18 @@ void image_process(const Mat &_img1,const Mat &_img2)
         cout<<points[i]<<endl;
     }
 
-    //通过第5步得到了points 3d坐标信息，接下来为BA非线性优化问题
-
+    //6.通过第5步得到了points 3d坐标信息，接下来为BA非线性优化问题
+    VecVector3d pts_3d_eigen;
+    VecVector2d pts_2d_eigen;
+    for(size_t i=0;i<points.size();++i)
+    {
+        pts_3d_eigen.push_back(Eigen::Vector3d(points[i].x,points[i].y,points[i].z));
+        pts_2d_eigen.push_back(Eigen::Vector2d(pts2[i].x,pts2[i].y));
+    }
+    Sophus::SE3d pose_gn;
+    bundleAdjustment_gaussNewton(pts_3d_eigen,pts_2d_eigen,K,pose_gn);
+    
+    
     Mat img2_CV;
     cv::cvtColor(_img2, img2_CV, COLOR_GRAY2BGR);
     for (int i = 0; i < pts2.size(); i++) {
