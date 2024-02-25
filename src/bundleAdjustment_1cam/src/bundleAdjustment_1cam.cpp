@@ -45,14 +45,32 @@ void reduceVector(vector<Point2f> &v ,vector<uchar> status)
     v.resize(j);
 }
 
+void pose_estimation_2d2d(
+    const vector<Point2f> &pts1,
+    const vector<Point2f> &pts2,
+    Mat &R,Mat &t)
+{
+    Mat K=(Mat_<double>(3,3)<<520.9,0,325.1,0,521.0,249.7,0,0,1);
+
+    Point2d principal_point(325.1,249.7);//对应像素平面（单位为pixel）和成像平面[归一化平面，单位为m]的关系，二者之间是单位的区别
+    int focal_length=521;//对应焦距
+    // principal_point和focal_length整合可以得到相机的内参K=[fx 0 cx
+                                                    //   0 fy cy
+                                                    //   0  0  1]
+    Mat essential_matrix;
+    essential_matrix=findEssentialMat(pts1,pts2,focal_length,principal_point);
+    recoverPose (essential_matrix,pts1,pts2,R,t,focal_length,principal_point);
+}
 /*
 1.首先通过goodFeaturesToTrack或者GFTTDetector特征检测获得特征点,
-2.通过边界检测，筛选不符合条件的点
-3.利用光流法获得下一帧特征点的位置
+2.利用光流法获得下一帧特征点的位置
+3.通过边界检测，筛选不符合条件的点
 --------------------------------------------
 -----通过上述操作能够得到两帧图像的2d信息---------
 -----   接下来要通过三角化得到3d信息   ----------
 --------------------------------------------
+4.2d-2d特征匹配获得初始的R和t
+5.基于2d-2d对极约束得到的R和t信息，使用三角测量获得位姿的深度，即3d信息
 */
 
 //===============================================//
@@ -71,11 +89,11 @@ void image_process(const Mat &_img1,const Mat &_img2)
     mask=Mat(ROW,COL,CV_8UC1,cv::Scalar(255));
     cv::goodFeaturesToTrack(_img1,pts1,500-pts1.size(),0.01,20,mask);
  
-    //通过LK光流法获取到特征点
+    //2.通过LK光流法获取到特征点
     cv::calcOpticalFlowPyrLK(_img1,_img2,pts1,pts2,status,err,cv::Size(21,21),3);
     
     
-    //剔除不相关的点
+    //3.剔除不相关的点
     for(int i=0;i< int(pts2.size());i++)
     {
         if(status[i] && !inBorder(pts2[i]))
@@ -86,6 +104,47 @@ void image_process(const Mat &_img1,const Mat &_img2)
     reduceVector(pts1,status);
     reduceVector(pts2,status);
     // reduceVector(ids,status);
+
+    //4.2d-2d对极约束获得两帧二维图像间的坐标变换信息R(旋转矩阵)和t(平移矩阵)
+    Mat R,t;
+    pose_estimation_2d2d(pts1,pts2,R,t);
+    cout<<"R"<<R<<endl;
+    cout<<"t"<<t<<endl;
+
+    //5.三角测量
+    Mat T1=(Mat_<float>(3,4)<<
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0);
+    Mat T2=(Mat_<float>(3,4)<<
+        R.at<double>(0,0),R.at<double>(0,1),R.at<double>(0,2),t.at<double>(0,0),
+        R.at<double>(1,0),R.at<double>(1,1),R.at<double>(1,2),t.at<double>(1,0),
+        R.at<double>(2,0),R.at<double>(2,1),R.at<double>(2,2),t.at<double>(2,0)
+    );
+    Mat K = (Mat_<double>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
+    Mat pts_4d;
+    //通过三角化得到的是齐次坐标[x,y,z,1]
+    triangulatePoints(T1,T2,pts1,pts2,pts_4d);
+    vector<Point3f> points;
+    //转换成非齐次坐标
+    for(int i=0;i<pts_4d.cols;i++)
+    {
+        Mat x=pts_4d.col(i);
+        x=x/x.at<float>(3,0);
+        Point3f p(
+            x.at<float>(0,0),
+            x.at<float>(1,0),
+            x.at<float>(2,0)
+        );
+        points.push_back(p);
+    }
+    for(int i=0;i<points.size();i++)
+    {
+        cout<<points[i]<<endl;
+    }
+
+    //通过第5步得到了points 3d坐标信息，接下来为BA非线性优化问题
+
     Mat img2_CV;
     cv::cvtColor(_img2, img2_CV, COLOR_GRAY2BGR);
     for (int i = 0; i < pts2.size(); i++) {
