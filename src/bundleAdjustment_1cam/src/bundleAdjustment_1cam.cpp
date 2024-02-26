@@ -72,6 +72,13 @@ void pose_estimation_2d2d(
     recoverPose (essential_matrix,pts1,pts2,R,t,focal_length,principal_point);
 }
 
+Point2f pixel2cam(const Point2f &p,const Mat &K)
+{
+    return Point2f(
+        (p.x-K.at<float>(0,2))/K.at<float>(0,0),
+        (p.y-K.at<float>(1,2))/K.at<float>(1,1)
+    );
+}
 // BA光束平差法(pnp的一种)利用3d-2d图像帧同时优化位姿和相机坐标，非线性优化得到更准确的R，t值
 void bundleAdjustment_gaussNewton(
     const VecVector3d &points_3d,const VecVector2d &points_2d,
@@ -82,10 +89,10 @@ void bundleAdjustment_gaussNewton(
     double cost=0,lastcost=0;//代价，这个应该表示的是误差吧？
     // 后面采用cost+=e  是因为在一张图像中不止一个特征点，因此要对一帧图中所有特征点的误差求和
     const int iteration=100;
-    double fx=K.at<double>(0,0);
-    double fy=K.at<double>(1,1);
-    double cx=K.at<double>(0,2);
-    double cy=K.at<double>(1,2);
+    float fx=K.at<float>(0,0);
+    float fy=K.at<float>(1,1);
+    float cx=K.at<float>(0,2);
+    float cy=K.at<float>(1,2);
 
     for(int it=0;it<iteration;it++)
     {
@@ -204,10 +211,21 @@ void image_process(const Mat &_img1,const Mat &_img2)
         R.at<double>(1,0),R.at<double>(1,1),R.at<double>(1,2),t.at<double>(1,0),
         R.at<double>(2,0),R.at<double>(2,1),R.at<double>(2,2),t.at<double>(2,0)
     );
-    Mat K = (Mat_<double>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
+    Mat K = (Mat_<float>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
+    //把像素平面转换到相机平面
+    
+    vector<Point2f> pts1_cam,pts2_cam;
+    for(int i=0;i<pts1.size();i++)
+    {
+        pts1_cam.push_back(pixel2cam(pts1[i],K));
+        pts2_cam.push_back(pixel2cam(pts2[i],K));
+        // cout<<pts1_cam;
+    }
+    
+    
     Mat pts_4d;
     //通过三角化得到的是齐次坐标[x,y,z,1]
-    triangulatePoints(T1,T2,pts1,pts2,pts_4d);
+    triangulatePoints(T1,T2,pts1_cam,pts2_cam,pts_4d);
     vector<Point3f> points;
     //转换成非齐次坐标
     for(int i=0;i<pts_4d.cols;i++)
@@ -285,8 +303,8 @@ int main(int argc,char **argv)
 {
     ros::init(argc,argv,"BA_1cam_node");
     ros::NodeHandle nh;
-    Mat img1=imread("./image/000001.png",0);
-    Mat img2=imread("./image/000002.png",0);
+    Mat img1=imread("./image/1.png",0);
+    Mat img2=imread("./image/2.png",0);
     COL=img2.cols;
     ROW=img2.rows;
     // 正常的opencv读取图像流程
