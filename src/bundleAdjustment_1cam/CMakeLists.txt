@@ -142,8 +142,13 @@ include_directories(
 ## The recommended prefix ensures that target names across packages don't collide
 add_executable(BA_part3_node 
 # src/bundleAdjustment_part3.cpp
-# src/bundleAdjustment_1cam.cpp
-src/optical_flow.cpp
+# src/test4_bundleAdjustment_1cam.cpp
+# src/optical_flow.cpp
+# src/test_triangle.cpp
+src/bundleAdjustment_1cam_multipic.cpp
+  # src/rosbag_read.cpp
+  # src/multipic_test.cpp
+  # src/rviz_test.cpp
 )
 
 ## Rename C++ executable without prefix
