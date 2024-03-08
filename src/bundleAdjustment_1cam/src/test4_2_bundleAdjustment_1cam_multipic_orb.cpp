@@ -34,6 +34,8 @@ using namespace cv;
 using namespace std;
 using namespace Eigen;
 
+Mat K=(Mat_<double>(3,3)<<461.6,0,363.0,0,460.3,248.1,0,0,1);
+
 typedef vector<Eigen::Vector2d,Eigen::aligned_allocator<Eigen::Vector2d>> VecVector2d;
 typedef vector<Eigen::Vector3d,Eigen::aligned_allocator<Eigen::Vector3d>> VecVector3d;
 bool init_structure=true;
@@ -83,8 +85,6 @@ void pose_estimation_2d2d(
     const vector<Point2f> &pts2,
     Mat &R,Mat &t)
 {
-    Mat K=(Mat_<double>(3,3)<<520.9,0,325.1,0,521.0,249.7,0,0,1);
-
     Point2f principal_point(325.1,249.7);//对应像素平面（单位为pixel）和成像平面[归一化平面，单位为m]的关系，二者之间是单位的区别
     int focal_length=521;//对应焦距
     // principal_point和focal_length整合可以得到相机的内参K=[fx 0 cx
@@ -98,29 +98,35 @@ void pose_estimation_2d2d(
 Point2f pixel2cam(const Point2f &p,const Mat &K)
 {
     return Point2f(
-        (p.x-K.at<float>(0,2))/K.at<float>(0,0),
-        (p.y-K.at<float>(1,2))/K.at<float>(1,1)
+        (p.x-K.at<double>(0,2))/K.at<double>(0,0),
+        (p.y-K.at<double>(1,2))/K.at<double>(1,1)
     );
 }
 
 Sophus::SE3d all_T;
+vector<uchar> state;
 // BA光束平差法(pnp的一种)利用3d-2d图像帧同时优化位姿和相机坐标，非线性优化得到更准确的R，t值
 void bundleAdjustment_gaussNewton(
     const VecVector3d &points_3d,const VecVector2d &points_2d,
     const Mat &K,
     Sophus::SE3d &T)//T对应位姿[R|t]
 {
+    state.clear();
     typedef Matrix<double ,6,1> Vector6d;//代表位姿R和t，矩阵T是位姿的李群
     double cost=0,lastcost=0;//代价，这个应该表示的是误差吧？
     // 后面采用cost+=e  是因为在一张图像中不止一个特征点，因此要对一帧图中所有特征点的误差求和
-    const int iteration=100;
-    float fx=K.at<float>(0,0);
-    float fy=K.at<float>(1,1);
-    float cx=K.at<float>(0,2);
-    float cy=K.at<float>(1,2);
+    const int iteration=10;
+    double fx=K.at<double>(0,0);
+    double fy=K.at<double>(1,1);
+    double cx=K.at<double>(0,2);
+    double cy=K.at<double>(1,2);
+
+    // cout<<"cx:"<<cx<<"cy"<<cy<<endl;
+    // cout<<"fx:"<<fx<<"fy"<<fy<<endl;
 
     for(int it=0;it<iteration;it++)
     {
+        // cout<<"the iteration is:"<<it<<endl;
         Matrix<double,6,6> H=Matrix<double,6,6>::Zero();
         Vector6d b=Vector6d::Zero();
         cost=0;
@@ -129,6 +135,11 @@ void bundleAdjustment_gaussNewton(
             Vector3d p_=T*points_3d[id];
             Vector2d pose_u(fx*p_[0]/p_[2]+cx,fy*p_[1]/p_[2]+cy);
             Vector2d e=points_2d[id]-pose_u;
+            
+
+            // state[id]=1;
+            // cout<<"误差ok"<<endl;
+            // cout<<endl<<"特征点"<<id<<"的误差值："<<e<<endl;
 
             cost+=e.squaredNorm();
             Matrix<double,2,6> J;
@@ -148,20 +159,25 @@ void bundleAdjustment_gaussNewton(
             fy + fy * y * y * inv_z2,
             -fy * x * y * inv_z2,
             -fy * x * inv_z;
-   
+
             H += J.transpose()*J;
             b += -J.transpose()*e;
-
         }
+        // cout<<"it:"<<it<<"cost:"<<cost<<endl;
+        // cout<<"it:"<<it<<"lastcost:"<<lastcost<<endl;
+
         Vector6d dx;
         dx=H.ldlt().solve(b);
+        // cout<<"dx:"<<dx<<endl;
         // 去掉两种无解的情况:（1）dx无解  （2）当前损失值比上一次还大，这种情况下并未进行优化，因此跳出循环，不保留此次结果
         if(isnan(dx[0]))
         {
+            cout<<"the dx is nan!"<<endl;
             break;
         }
         if(it>0 && cost>=lastcost)
         {
+            cout<<"wrong!!!!!!!!!!!!!"<<endl;
             break;
         }
 
@@ -170,9 +186,42 @@ void bundleAdjustment_gaussNewton(
 
         if(dx.norm()<1e-6)
         {
+            cout<<"the dx<1e-6"<<endl;
             break;
         }
     }
+    int count_=0;
+    for(int id=0;id<points_3d.size();id++)
+    {
+        Vector3d points_=T*points_3d[id];
+        Vector2d pose_u(fx*points_[0]/points_[2]+cx,fy*points_[1]/points_[2]+cy);
+        Vector2d e=points_2d[id]-pose_u;
+        // cout<<"id:"<<id<<"--e:"<<e.x()<<","<<e.y()<<endl;
+        
+        if(e.x()>-2 && e.x()<2 && e.y()>-2 && e.y()<2)
+        {
+            cout<<"######################"<<endl;
+            cout<<"id:"<<id<<"--e:"<<e.x()<<","<<e.y()<<endl;
+            state.push_back(1);
+
+            // state[id]=1;
+        }
+        else
+        {
+            count_++;
+            state.push_back(0);
+        }
+            
+    }
+    cout<<"不符合的点的数量"<<count_<<endl;
+    cout<<"BA中的3d-size:"<<points_3d.size()<<endl;
+    cout<<"BA中的2d-size:"<<points_2d.size()<<endl;
+
+    //  for(int id=0;id<points_3d.size();id++)
+    //     {
+    //         Vector3d p_=T*points_3d[id];
+    //         Vector2d pose_u(fx*p_[0]/p_[2]+cx,fy*p_[1]/p_[2]+cy);
+    //         Vector2d e=points_2d[id]-pose_u;
     all_T=T;
     cout<<T.matrix()<<endl;
 }
@@ -230,16 +279,15 @@ void image_init(const Mat &_img1,const Mat &_img2)
     // cout<<"t"<<t<<endl;
 
     //5.三角测量
-    Mat T1=(Mat_<float>(3,4)<<
+    Mat T1=(Mat_<double>(3,4)<<
         1,0,0,0,
         0,1,0,0,
         0,0,1,0);
-    Mat T2=(Mat_<float>(3,4)<<
+    Mat T2=(Mat_<double>(3,4)<<
         R.at<double>(0,0),R.at<double>(0,1),R.at<double>(0,2),t.at<double>(0,0),
         R.at<double>(1,0),R.at<double>(1,1),R.at<double>(1,2),t.at<double>(1,0),
         R.at<double>(2,0),R.at<double>(2,1),R.at<double>(2,2),t.at<double>(2,0)
     );
-    Mat K = (Mat_<float>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
     //把像素平面转换到相机平面
     
     vector<Point2f> pts1_cam,pts2_cam;
@@ -283,30 +331,59 @@ void image_init(const Mat &_img1,const Mat &_img2)
     Sophus::SE3d pose_gn;
     bundleAdjustment_gaussNewton(pts_3d_eigen,pts_2d_eigen,K,pose_gn);
 
+    cout<<"###BA之前的pts2-2d点size####:"<<pts2.size()<<endl;
+    cout<<"###BA之前的pts1-2d点size####:"<<pts1.size()<<endl;
+
+
+    reduceVector(pts1,state);//筛选平面中的2d点 ，误差较大的不保留
+    reduceVector(pts2,state);//筛选平面中的2d点 ，误差较大的不保留
+    reduceVector3d(pts_3d_eigen,state);//把经过BA筛选后的3d点进行位姿坐标变换，state=0的点不再进行3d点运算
+    cout<<"###BA之后的pts_3d_eigen-3d点size####:"<<pts_3d_eigen.size()<<endl;
+    cout<<"###BA之后的pts2-2d点size####:"<<pts2.size()<<endl;
+    cout<<"###BA之后的pts1-2d点size####:"<<pts1.size()<<endl;
+
     //初始化，存储最开始的3d点坐标
     for(int id=0;id<pts_3d_eigen.size();id++)
     {
         Vector3d pose=all_T*pts_3d_eigen[id];
         all_points3d_init.push_back(pose);
-
     }
+    //此处all_points3d_init的size应该和pts_3d_eigen的size相同，只不过矩阵的值由于经过了BA优化，有所区别，即x'=Rx+t
+    cout<<"process_all_points3d_init:"<<all_points3d_init.size()<<endl;
+
     _img2.copyTo(all_img_buf);
     all_pts_buf=pts2;
 
-    cout<<"image_init_all_pts_buf:"<<all_pts_buf.size()<<endl;
-    cout<<"image_init_all_pts2:"<<pts2.size()<<endl;
-    cout<<"image_init_all_points3d_init:"<<all_points3d_init.size()<<endl;
+    // Mat img2_CV;
+    // //生成随机颜色
+    // cv::RNG rng(12345);
+    // //将_img1,_img2拼接在一起，生成图像img2_CV,用于接下来的特征匹配
+    // hconcat(_img1, _img2, img2_CV);
+    // cv::cvtColor(img2_CV, img2_CV, COLOR_GRAY2BGR);
+    // // imshow("img2_CV",img2_CV);
+    // for (int i = 0; i < pts2.size(); i++) {
+    //     if (status[i]) {
+    //         //cv::Scalar用于随机生成图像颜色
+    //         cv::Scalar color(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+    //         cv::line(img2_CV, pts1[i], pts2[i]+Point2f(_img1.cols,0), color,1);
+    //         cv::circle(img2_CV, pts1[i], 2, color, -1);
+    //         cv::circle(img2_CV, pts2[i]+Point2f(_img1.cols,0), 2, color, -1);
+    //     }
+    // }
+    // imshow("img2_CV",img2_CV);
 
-    Mat img2_CV;
-    cv::cvtColor(_img2, img2_CV, COLOR_GRAY2BGR);
+    Mat img_CV;
+    cv::cvtColor(_img2, img_CV, COLOR_GRAY2BGR);
     for (int i = 0; i < pts2.size(); i++) {
         if (status[i]) {
-            cv::circle(img2_CV, pts2[i], 2, cv::Scalar(0, 250, 0), 2);
-            cv::line(img2_CV, pts1[i], pts2[i], cv::Scalar(0, 250, 0));
+            cv::circle(img_CV, pts2[i], 2, cv::Scalar(0, 250, 0), 2);
+            cv::line(img_CV, pts1[i], pts2[i], cv::Scalar(0, 250, 0));
         }
     }
-    imshow("img2_CV",img2_CV);
+    imshow("img_CV",img_CV);
+
     waitKey(0);
+
     
 }
 
@@ -353,7 +430,6 @@ void image_process(const Mat &_img1,const Mat &_img2)
         R.at<double>(1,0),R.at<double>(1,1),R.at<double>(1,2),t.at<double>(1,0),
         R.at<double>(2,0),R.at<double>(2,1),R.at<double>(2,2),t.at<double>(2,0)
     );
-    Mat K = (Mat_<float>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
     //把像素平面转换到相机平面
     
     vector<Point2f> pts1_cam,pts2_cam;
@@ -400,7 +476,7 @@ void image_process(const Mat &_img1,const Mat &_img2)
     cout<<"image_init_pts_2d_eigen:"<<pts_2d_eigen.size()<<endl;
     Sophus::SE3d pose_gn;
     bundleAdjustment_gaussNewton(pts_3d_eigen,pts_2d_eigen,K,pose_gn);
-
+    
     //初始化，存储最开始的3d点坐标
     for(int id=0;id<pts_3d_eigen.size();id++)
     {
@@ -408,6 +484,30 @@ void image_process(const Mat &_img1,const Mat &_img2)
         all_points3d_init.push_back(pose);
 
     }
+
+    reduceVector(pts1,state);
+    reduceVector(pts2,state);
+    reduceVector3d(all_points3d_init,state);
+
+    // Mat img2_CV;
+    // //生成随机颜色
+    // cv::RNG rng(12345);
+    // //将_img1,_img2拼接在一起，生成图像img2_CV,用于接下来的特征匹配
+    // hconcat(_img1, _img2, img2_CV);
+    // cv::cvtColor(img2_CV, img2_CV, COLOR_GRAY2BGR);
+    // // imshow("img2_CV",img2_CV);
+    // for (int i = 0; i < pts2.size(); i++) {
+    //     if (status[i]) {
+    //         //cv::Scalar用于随机生成图像颜色
+    //         cv::Scalar color(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+    //         cv::line(img2_CV, pts1[i], pts2[i]+Point2f(_img1.cols,0), color,1);
+    //         cv::circle(img2_CV, pts1[i], 2, color, -1);
+    //         cv::circle(img2_CV, pts2[i]+Point2f(_img1.cols,0), 2, color, -1);
+    //     }
+    // }
+    // imshow("img2_CV",img2_CV);
+    // waitKey(0);
+
     _img2.copyTo(all_img_buf);
     all_pts_buf=pts2;
 
@@ -439,7 +539,6 @@ void newImage_process(const Mat &_img1,const Mat &_img2)
     
     //2.通过LK光流法获取到特征点
     cv::calcOpticalFlowPyrLK(_img1,_img2,all_pts_buf,pts2,status,err,cv::Size(21,21),3);
-    Mat K = (Mat_<float>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
     
     reduceVector(all_pts_buf,status);
     reduceVector(pts2,status);
@@ -465,7 +564,14 @@ void newImage_process(const Mat &_img1,const Mat &_img2)
     
     bundleAdjustment_gaussNewton(all_points3d,pts_2d_eigen,K,pose_gn);
    
+    reduceVector(all_pts_buf,state);//筛选平面中的2d点 ，误差较大的不保留
+    reduceVector(pts2,state);//筛选平面中的2d点 ，误差较大的不保留
+    reduceVector3d(all_points3d,state);//把经过BA筛选后的3d点进行位姿坐标变换，state=0的点不再进行3d点运算
     
+    cout<<"###BA之后的pts_3d_eigen-3d点size####:"<<all_points3d.size()<<endl;
+    cout<<"###BA之后的pts2-2d点size####:"<<pts2.size()<<endl;
+    cout<<"###BA之后的pts1-2d点size####:"<<all_pts_buf.size()<<endl;
+
     //初始化，存储最开始的3d点坐标
     for(int id=0;id<all_points3d.size();id++)
     {
@@ -473,6 +579,8 @@ void newImage_process(const Mat &_img1,const Mat &_img2)
         all_points3d_init.push_back(pose);
 
     }
+    //此处all_points3d_init的size应该和pts_3d_eigen的size相同，只不过矩阵的值由于经过了BA优化，有所区别，即x'=Rx+t
+    cout<<"process_all_points3d_init:"<<all_points3d_init.size()<<endl;
 
     Mat img2_CV;
     cv::cvtColor(_img2, img2_CV, COLOR_GRAY2BGR);
@@ -484,6 +592,27 @@ void newImage_process(const Mat &_img1,const Mat &_img2)
     }
     imshow("img2_CV",img2_CV);
     waitKey(0);
+    
+
+    // Mat img_CV;
+    // //生成随机颜色
+    // cv::RNG rng(12345);
+    // //将_img1,_img2拼接在一起，生成图像img2_CV,用于接下来的特征匹配
+    // hconcat(_img1, _img2, img_CV);
+    // cv::cvtColor(img_CV, img_CV, COLOR_GRAY2BGR);
+    // // imshow("img2_CV",img2_CV);
+    // for (int i = 0; i < pts2.size(); i++) {
+    //     if (status[i]) {
+    //         //cv::Scalar用于随机生成图像颜色
+    //         cv::Scalar color(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+    //         cv::line(img_CV, all_pts_buf[i], pts2[i]+Point2f(_img1.cols,0), color,1);
+    //         cv::circle(img_CV, all_pts_buf[i], 2, color, -1);
+    //         cv::circle(img_CV, pts2[i]+Point2f(_img1.cols,0), 2, color, -1);
+    //     }
+    // }
+    // imshow("img2_CV",img2_CV);
+    // waitKey(0);
+
     _img2.copyTo(all_img_buf);
     all_pts_buf=pts2;
 }
@@ -541,6 +670,7 @@ void feature_detect_lk(const Mat &_img1,const Mat &_img2)
 //-------------------------------用于测试特征匹配效果-------------------------------------//
 //------------------------------------------------------------------------------------//
 
+
 Sophus::SE3d pose_buf;
 vector<Point2f> pts_buf;//存储前一张图对应的像素坐标S
 
@@ -593,38 +723,40 @@ int main(int argc,char **argv)
     path.poses.push_back(pose_stamped);
     pub_path.publish(path);
 
+
     for(int i=0;i<img_msg.size();i++)
     {
-        
-
         if(i!=img_msg.size()-1)
         {
             img1=img_msg[i];
             img2=img_msg[i+1];
             COL=img2.cols;
             ROW=img2.rows;
+            Ptr<CLAHE>clahe=createCLAHE(3.0,Size(8,8));
+            clahe->apply(img1,img1);
+            clahe->apply(img2,img2);
+            // feature_detect_lk(img1,img2);
+            image_init(img1,img2);
 
-            feature_detect_lk(img1,img2);
-            if(init_structure )
-            {
-                image_init(img1,img2);
-                init_structure=false;
+            // if(init_structure )
+            // {
+            //     image_init(img1,img2);
+            //     init_structure=false;
                 
-            }
-            else
-            {
-                if(i%10==0)
-                {
-                    cout<<"wwwwwwwwwwwwwwww"<<endl;
-                    image_process(all_img_buf,img2);
-                }
+            // }
+            // else
+            // {
+            //     if(i%10==0)
+            //     {
+            //         image_process(all_img_buf,img2);
+            //     }
                     
-                // 现在已知第一帧的空间位置为points3d_init[x,y,z]
-                // 变量是插入的新一帧
-                // image_init(img1,img2);
-                else
-                    newImage_process(all_img_buf,img2);
-            }
+            //     // 现在已知第一帧的空间位置为points3d_init[x,y,z]
+            //     // 变量是插入的新一帧
+            //     // image_init(img1,img2);
+            //     else
+            //         newImage_process(all_img_buf,img2);
+            // }
         }
         geometry_msgs::PoseStamped pose_stamped;
         pose_stamped.header.stamp=ros::Time::now();
@@ -634,14 +766,14 @@ int main(int argc,char **argv)
 
         // all_points3d_init为VecVector类型，其中包含了多个特征点的[x,y,z]
         Vector3d pose_new=all_T*pose_init;
-        pose_stamped.pose.position.x=pose_new.x()/100;
-        pose_stamped.pose.position.y=pose_new.y()/100;
-        pose_stamped.pose.position.z=pose_new.z()/100;
+        pose_stamped.pose.position.x=pose_new.x();
+        pose_stamped.pose.position.y=pose_new.y();
+        pose_stamped.pose.position.z=pose_new.z();
         
         cout<<"all_points3d_init[0].x"<<pose_stamped.pose.position.x<<endl;
         cout<<"all_points3d_init[0].y"<<pose_stamped.pose.position.y<<endl;
         cout<<"all_points3d_init[0].z"<<pose_stamped.pose.position.z<<endl;
-
+        cout<<"===================================================================="<<endl;
         path.poses.push_back(pose_stamped);
         pub_path.publish(path);
 
